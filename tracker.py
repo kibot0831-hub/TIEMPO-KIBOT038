@@ -14,6 +14,11 @@ Reglas de resolución (conservadoras):
   · caducidad a TRACK_TIMEOUT_BARS velas: se valora a precio de mercado (EXP)
   · R neto = R bruto − FEE_RT_PCT / riesgo%  (las comisiones pesan más cuanto
     más pequeño es el stop)
+
+v3.2: cada esperanza se publica con su IC95% (E ± x R) y se marca con ⚠ cuando
+n es menor de 30: con pocas señales un E positivo es casi siempre ruido.
+`edge()` expone la esperanza reciente del tier A para que el bot decida si
+LIVE está validado (LIVE_REQUIRE_EDGE).
 """
 from __future__ import annotations
 
@@ -70,7 +75,8 @@ class Tracker:
                 "score": s.score, "xsec": round(s.xsec_pct, 1), "rvol": round(s.rvol, 2),
                 "btc": s.btc_state, "trend": s.trend, "abs": bool(s.absorb),
                 "risk": round(s.risk_pct, 3), "dist": round(s.dist_atr, 2),
-                "fmin": round(s.funding_min), "live": bool(live),
+                "fmin": round(s.funding_min), "fpts": int(getattr(s, "fpts", 0)),
+                "live": bool(live),
                 "o1": None, "o2": None,
             }
         )
@@ -151,7 +157,7 @@ class Tracker:
                     "sym", "side", "tier", "src", "score", "xsec", "rvol", "btc",
                     "trend", "abs", "risk", "dist", "fmin", "live", "ts")}
                 rec.update(
-                    o1=o1, o2=o2,
+                    fpts=p.get("fpts", 0), o1=o1, o2=o2,
                     r1=round(self._r(p, o1, p["tp1"], px), 3),
                     r2=round(self._r(p, o2, p["tp2"], px), 3),
                 )
@@ -168,19 +174,40 @@ class Tracker:
             self.save()
         return closed
 
-    # ── informe ───────────────────────────────────────────────────────
+    # ── estadística ───────────────────────────────────────────────────
     @staticmethod
-    def _line(label: str, items: list[dict]) -> str:
+    def _stats(xs: list[float]) -> tuple[float, float]:
+        """(media, semiancho del IC95%) de una lista de R."""
+        n = len(xs)
+        if n == 0:
+            return 0.0, 0.0
+        m = sum(xs) / n
+        if n < 2:
+            return m, 0.0
+        sd = (sum((x - m) ** 2 for x in xs) / (n - 1)) ** 0.5
+        return m, 1.96 * sd / n ** 0.5
+
+    def edge(self, tier: str = "A", tp: str = "TP1", last: int = 200) -> tuple[int, float, float]:
+        """(n, esperanza media en R, semiancho IC95%) de las últimas `last` señales del tier."""
+        k = "r2" if tp == "TP2" else "r1"
+        xs = [d[k] for d in self.data["done"] if d.get("tier") == tier][-max(1, last):]
+        m, ci = self._stats(xs)
+        return len(xs), m, ci
+
+    # ── informe ───────────────────────────────────────────────────────
+    @classmethod
+    def _line(cls, label: str, items: list[dict]) -> str:
         n = len(items)
 
         def part(o_key: str, r_key: str) -> str:
             dec = [d for d in items if d[o_key] in ("TP", "SL")]
             win = sum(1 for d in dec if d[o_key] == "TP")
             wr = f"{win / len(dec) * 100:.0f}%" if dec else "n/a"
-            ex = sum(d[r_key] for d in items) / n
-            return f"{wr} E{ex:+.2f}R"
+            m, ci = cls._stats([d[r_key] for d in items])
+            return f"{wr} E{m:+.2f}±{ci:.2f}R"
 
-        return f"{label}: n={n} · TP1 {part('o1', 'r1')} · TP2 {part('o2', 'r2')}"
+        warn = "⚠" if n < 30 else ""
+        return f"{label}: n={n}{warn} · TP1 {part('o1', 'r1')} · TP2 {part('o2', 'r2')}"
 
     def _group(self, key, min_n: int = 5) -> list[str]:
         g: dict[str, list[dict]] = defaultdict(list)
@@ -188,22 +215,34 @@ class Tracker:
             g[key(d)].append(d)
         return [self._line(k, v) for k, v in sorted(g.items()) if len(v) >= min_n]
 
+    @staticmethod
+    def _funding_bucket(d: dict) -> str:
+        if d.get("fmin", 999) > 45:
+            return "funding: fuera de ventana"
+        f = d.get("fpts", 0)
+        return "funding a favor" if f > 0 else "funding en contra" if f < 0 else "funding neutro"
+
     def summary(self) -> str:
         done = self.data["done"]
         pend = len(self.data["pending"])
         if not done:
             return f"Seguimiento: sin señales resueltas aún ({pend} en curso)"
         lines = [f"Seguimiento en papel · {len(done)} resueltas · {pend} en curso",
-                 "(E = esperanza en R, neta de comisiones; win% sin contar caducadas)"]
+                 "(E = esperanza en R neta de comisiones ± IC95%; ⚠ = n menor de 30, "
+                 "no concluyente; win% sin contar caducadas)"]
         lines += self._group(lambda d: f"{d['tier']}·{d['src']}", min_n=1)
         if len(done) >= 30:
             lines.append("— desglose —")
+            lines += self._group(lambda d: d["side"])
             lines += self._group(lambda d: f"BTC {d['btc']}")
             lines += self._group(lambda d: f"tend {d['trend']}")
             lines += self._group(lambda d: "absorción" if d["abs"] else "sin absorción")
             lines += self._group(
                 lambda d: "p<50" if d["xsec"] < 50 else "p50-75" if d["xsec"] < 75
                 else "p75-90" if d["xsec"] < 90 else "p90+")
+            lines += self._group(lambda d: "score menor de 70" if d["score"] < 70
+                                 else "score 70-79" if d["score"] < 80 else "score 80+")
+            lines += self._group(self._funding_bucket)
             lines += self._group(lambda d: "stop corto (riesgo menor de 0.5%)" if d["risk"] < 0.5
                                  else "stop normal (riesgo 0.5% o más)")
             lines += self._group(lambda d: "entrada cerca del nivel" if d["dist"] <= config.NEAR_ATR

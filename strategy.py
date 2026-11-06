@@ -20,6 +20,15 @@ v3.1:
 - Última vela cerrada por reloj, no por posición en la lista.
 - Embudo (Counter) para ver en qué filtro muere cada símbolo.
 - Tiers: A = setup completo; B = menos filtro de volumen / CONT (solo señal).
+
+v3.2:
+- La confirmación exige que el CIERRE ACTUAL siga del lado de la señal. Antes,
+  con 2 de 3 cierres bajo el nivel pero el último ya de vuelta encima, salía un
+  SHORT con la entrada por encima del nivel barrido (setup ya fallido).
+- El percentil se calcula con la MISMA métrica que el universo (RVOL máximo de
+  la ventana de sweep). Antes se comparaba el RVOL de la vela de sweep (siempre
+  ≤ ese máximo) contra una distribución de máximos: sesgo a la baja.
+- Signal guarda `fpts` (puntos de funding) para validar ese edge en el tracker.
 """
 from __future__ import annotations
 
@@ -56,6 +65,8 @@ class Signal:
     tier: str = "A"                  # A = completo | B = relajado (solo señal)
     bar_time: int = 0                # apertura (ms) de la vela de confirmación
     ext: float = 0.0                 # extremo estructural usado para el SL
+    rvol_win: float = 0.0            # RVOL máx. de la ventana de sweep (métrica del universo)
+    fpts: int = 0                    # puntos de funding aplicados al score
 
 
 @dataclass
@@ -269,25 +280,27 @@ def analyze(
     # lvl = nivel de referencia del setup; ext = extremo estructural para el SL
     #   GRAB: ext = extremo de la mecha del sweep (o más allá, si hubo otro empujón)
     #   CONT: ext = mínimo/máximo de las velas de confirmación (fallo de la rotura)
+    #   El cierre ACTUAL c[i] debe seguir del lado de la señal: con 2 de 3 cierres
+    #   bajo el nivel pero el último ya de vuelta encima, el setup ya falló.
     need = max(1, acc // 2 + 1)
     side = src = None
     lvl = ext = 0.0
     if sw_up:
         below = sum(1 for k in range(sweep_end + 1, i + 1) if c[k] < p_up)
         above = sum(1 for k in range(sweep_end + 1, i + 1) if c[k] > p_up)
-        if below >= need:
+        if below >= need and c[i] < p_up:
             side, src, lvl = "SHORT", "GRAB", p_up
             ext = float(np.max(h[first_up : i + 1]))
-        elif above >= need and dep_up >= 0.25 and config.ALLOW_CONT:
+        elif above >= need and c[i] > p_up and dep_up >= 0.25 and config.ALLOW_CONT:
             side, src, lvl = "LONG", "CONT", p_up
             ext = float(np.min(l[sweep_end + 1 : i + 1]))
     if side is None and sw_dn:
         above = sum(1 for k in range(sweep_end + 1, i + 1) if c[k] > p_dn)
         below = sum(1 for k in range(sweep_end + 1, i + 1) if c[k] < p_dn)
-        if above >= need:
+        if above >= need and c[i] > p_dn:
             side, src, lvl = "LONG", "GRAB", p_dn
             ext = float(np.min(l[first_dn : i + 1]))
-        elif below >= need and dep_dn >= 0.25 and config.ALLOW_CONT:
+        elif below >= need and c[i] < p_dn and dep_dn >= 0.25 and config.ALLOW_CONT:
             side, src, lvl = "SHORT", "CONT", p_dn
             ext = float(np.max(h[sweep_end + 1 : i + 1]))
 
@@ -411,6 +424,8 @@ def analyze(
             trend=trend,
             bar_time=int(rows[i]["time"]),
             ext=float(ext),
+            rvol_win=float(metric),
+            fpts=int(f_pts),
         ),
         metric,
     )
@@ -444,7 +459,9 @@ def apply_cross_sectional(
     out: list[Signal] = []
     for s in candidates:
         if use_x:
-            rank = float(np.searchsorted(arr, s.rvol, side="right")) / len(arr) * 100.0
+            # misma métrica que el universo (máx. RVOL de la ventana de sweep)
+            val = s.rvol_win if s.rvol_win > 0 else s.rvol
+            rank = float(np.searchsorted(arr, val, side="right")) / len(arr) * 100.0
             s.xsec_pct = rank
         else:
             rank = 100.0

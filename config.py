@@ -128,6 +128,14 @@ MAX_TRADES_DAY = _int("MAX_TRADES_DAY", 6)      # solo cuenta órdenes LIVE
 MAX_LOSSES_DAY = _int("MAX_LOSSES_DAY", 3)
 COOLDOWN_BARS = _int("COOLDOWN_BARS", 6)        # velas de espera por símbolo
 MAX_OPEN = _int("MAX_OPEN", 3)
+MAX_SAME_SIDE = _int("MAX_SAME_SIDE", 2)        # tope de LIVE abiertas en el MISMO sentido (0 = sin tope)
+MAX_ENTRY_DRIFT_R = _float("MAX_ENTRY_DRIFT_R", 0.25)  # no entra si el precio se movió más de esta fracción de R
+
+# LIVE solo si el seguimiento en papel (tier A, LIVE_TP) demuestra esperanza positiva
+LIVE_REQUIRE_EDGE = _bool("LIVE_REQUIRE_EDGE", True)
+LIVE_MIN_SAMPLES = _int("LIVE_MIN_SAMPLES", 100)       # señales A resueltas mínimas
+LIVE_MIN_EDGE_R = _float("LIVE_MIN_EDGE_R", 0.0)       # esperanza media neta mínima (R)
+LIVE_EDGE_WINDOW = _int("LIVE_EDGE_WINDOW", 200)       # últimas N señales A que se miran
 
 # ── seguimiento en papel (¿qué habría pasado con cada señal?) ─────────
 TRACK_ENABLED = _bool("TRACK_ENABLED", True)

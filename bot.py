@@ -50,9 +50,11 @@ def round_sig(bx: BingX, s: Signal) -> None:
         setattr(s, f, bx.round_price(s.symbol, getattr(s, f)))
 
 
-def fmt_sig(s: Signal, mode: str) -> str:
+def fmt_sig(s: Signal, mode: str, trading: bool | None = None) -> str:
     arrow = "🟢 LONG" if s.side == "LONG" else "🔴 SHORT"
-    live = "LIVE" if (mode == "LIVE" and s.tier == "A") else "SOLO SEÑAL"
+    if trading is None:
+        trading = mode == "LIVE" and s.tier == "A"
+    live = "LIVE" if trading else "SOLO SEÑAL"
     abs_t = " · ABSORCIÓN" if s.absorb else ""
     tier = " · 🟡 TIER B (filtro relajado)" if s.tier == "B" else ""
     btc = {"alineado": "alineado ✓", "contra": "EN CONTRA ✗", "líder": "es el líder"}.get(
@@ -135,16 +137,38 @@ async def fetch_all(bx: BingX, symbols: list[str]) -> dict[str, list[dict]]:
 
 
 # ── ejecución real ────────────────────────────────────────────────────
-async def try_live_order(bx: BingX, sig: Signal, equity: float) -> Optional[str]:
-    risk_px = abs(sig.entry - sig.sl)
-    if risk_px <= 0 or equity <= 0:
-        return None
+async def try_live_order(bx: BingX, sig: Signal, equity: float) -> tuple[Optional[str], str]:
+    """Devuelve (client_id | None, nota). La nota explica por qué no se operó."""
+    if equity <= 0 or abs(sig.entry - sig.sl) <= 0:
+        return None, "equity/riesgo inválido"
+
+    # La señal es del CIERRE de la vela anterior y el escaneo tarda (cientos de
+    # peticiones): al enviar la orden el precio ya se movió. SL/TP son absolutos,
+    # así que si el precio se desplazó mucho el R:R real deja de ser el calculado.
+    risk0 = abs(sig.entry - sig.sl)
+    ref_px = sig.entry
+    try:
+        rows = await bx.klines(sig.symbol, config.TIMEFRAME, 2)
+        if rows:
+            ref_px = float(rows[-1]["close"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("%s precio actual: %s (uso la entrada de la señal)", sig.symbol, exc)
+    drift_r = abs(ref_px - sig.entry) / risk0
+    if drift_r > config.MAX_ENTRY_DRIFT_R:
+        log.info("%s entrada desfasada %.2fR (> %.2fR): no se opera", sig.symbol, drift_r,
+                 config.MAX_ENTRY_DRIFT_R)
+        return None, f"entrada desfasada {drift_r:.2f}R"
+
+    # el riesgo real es hasta el SL desde donde se llena, no desde el cierre de la vela
+    risk_px = abs(ref_px - sig.sl)
+    if risk_px <= 0:
+        return None, "precio en el SL"
     qty = (equity * config.RISK_PCT / 100.0) / risk_px
-    qty = min(qty, (equity * config.MAX_LEVERAGE) / sig.entry)
+    qty = min(qty, (equity * config.MAX_LEVERAGE) / ref_px)
     qty = bx.round_qty(sig.symbol, qty)
     if qty <= 0 or qty < bx.min_qty(sig.symbol):
         log.warning("%s qty baja %.8f", sig.symbol, qty)
-        return None
+        return None, "cantidad bajo el mínimo del contrato"
 
     side = "BUY" if sig.side == "LONG" else "SELL"
     pos_side = "LONG" if sig.side == "LONG" else "SHORT"
@@ -152,7 +176,12 @@ async def try_live_order(bx: BingX, sig: Signal, equity: float) -> Optional[str]
     tp = bx.round_price(sig.symbol, sig.tp2 if config.LIVE_TP == "TP2" else sig.tp1)
     cid = f"ipda{int(time.time() * 1000)}"
 
-    await bx.set_margin_mode(sig.symbol, "ISOLATED")
+    # Un fallo aquí (p. ej. ya estaba en ISOLATED) NO debe tumbar el ciclo entero
+    # ni dejar sin procesar las demás señales.
+    try:
+        await bx.set_margin_mode(sig.symbol, "ISOLATED")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("%s margin mode: %s", sig.symbol, exc)
     try:
         await bx.set_leverage(sig.symbol, pos_side, config.LEVERAGE)
     except Exception as exc:  # noqa: BLE001
@@ -161,20 +190,54 @@ async def try_live_order(bx: BingX, sig: Signal, equity: float) -> Optional[str]
     try:
         # SL y TP viajan en la MISMA orden: sin ventana de posición desprotegida.
         await bx.market_order(sig.symbol, side, qty, sl, tp, cid)
-        return cid
+        return cid, f"desfase {drift_r:.2f}R"
     except (BingXError, httpx.HTTPError) as exc:
         log.error("LIVE %s: %s", sig.symbol, exc)
         # la respuesta pudo perderse con la orden ya ejecutada
         try:
             if await bx.order_exists(sig.symbol, cid):
-                return cid
+                return cid, "confirmada tras error de red"
         except Exception:  # noqa: BLE001
             pass
+        return None, "rechazada por BingX"
+
+
+def _hit_outcome(info: dict, rows: list[dict]) -> Optional[bool]:
+    """
+    True = tocó TP primero, False = tocó SL primero, None = ninguno visible.
+    Si SL y TP caen en la misma vela cuenta SL (no se conoce el orden).
+    """
+    long = info.get("side") == "LONG"
+    sl, tp = info.get("sl"), info.get("tp")
+    if not sl or not tp:
         return None
+    t0 = float(info.get("ts", 0)) * 1000.0
+    tf_ms = config.TF_SEC * 1000
+    for r in sorted(rows, key=lambda x: x["time"]):
+        if r["time"] + tf_ms <= t0:          # vela cerrada antes de la entrada
+            continue
+        sl_hit = r["low"] <= sl if long else r["high"] >= sl
+        tp_hit = r["high"] >= tp if long else r["low"] <= tp
+        if sl_hit:
+            return False
+        if tp_hit:
+            return True
+    return None
+
+
+def open_side_count(state: State, side: str) -> int:
+    return sum(1 for v in state.data.get("open", {}).values() if v.get("side") == side)
 
 
 async def reconcile(bx: BingX, tg: Telegram, state: State) -> None:
-    """Quita de state['open'] lo que ya no está abierto en BingX y cuenta W/L."""
+    """
+    Quita de state['open'] lo que ya no está abierto en BingX y cuenta W/L.
+
+    El resultado se decide por QUÉ nivel (SL o TP) tocó el precio desde la
+    entrada. Antes se comparaba «precio actual vs entrada»: una operación parada
+    por SL contaba como ganada si el precio rebotaba después (y al revés), y
+    MAX_LOSSES_DAY depende de estas cuentas.
+    """
     opens = state.data.get("open", {})
     if not opens:
         return
@@ -191,17 +254,23 @@ async def reconcile(bx: BingX, tg: Telegram, state: State) -> None:
     for sym, info in list(opens.items()):
         if sym in live or time.time() - float(info.get("ts", 0)) < 90:
             continue
-        won = False
+        won, exact = False, False
         try:
-            rows = await bx.klines(sym, config.TIMEFRAME, 3)
-            px = rows[-1]["close"]
-            won = px > info["entry"] if info["side"] == "LONG" else px < info["entry"]
+            bars_since = int((time.time() - float(info.get("ts", 0))) / config.TF_SEC) + 3
+            rows = await bx.klines(sym, config.TIMEFRAME, max(3, min(config.KLINE_LIMIT, bars_since)))
+            hit = _hit_outcome(info, rows)
+            if hit is not None:
+                won, exact = hit, True
+            else:  # ni SL ni TP visibles (cierre manual, datos cortos): precio vs entrada
+                px = rows[-1]["close"]
+                won = px > info["entry"] if info["side"] == "LONG" else px < info["entry"]
         except Exception:  # noqa: BLE001
             pass
         state.close_trade(sym, won)
+        how = "por SL/TP" if exact else "resultado aprox."
         await tg.send(
             f"{'✅' if won else '❌'} <b>{sym}</b> {info.get('side')} cerrada "
-            f"(resultado aprox.) · W/L {state.data['wins']}/{state.data['losses']}"
+            f"({how}) · W/L {state.data['wins']}/{state.data['losses']}"
         )
 
 
@@ -266,37 +335,61 @@ async def scan_once(
         dict(funnel), p50, p75, p90, len(ranked), len(candidates), len(final_a), len(final_b),
     )
 
+    # LIVE solo si el edge medido en papel (tier A, TP elegido) está validado
+    live_ok, edge_txt = True, ""
+    if live and config.LIVE_REQUIRE_EDGE and config.TRACK_ENABLED:
+        n_e, m_e, ci_e = trk.edge("A", config.LIVE_TP, config.LIVE_EDGE_WINDOW)
+        live_ok = n_e >= config.LIVE_MIN_SAMPLES and m_e > config.LIVE_MIN_EDGE_R
+        edge_txt = (f"A·{config.LIVE_TP} n={n_e}/{config.LIVE_MIN_SAMPLES} "
+                    f"E{m_e:+.2f}±{ci_e:.2f}R")
+        if not live_ok:
+            log.info("LIVE en pausa: edge sin validar (%s; E mín %+.2f)", edge_txt,
+                     config.LIVE_MIN_EDGE_R)
+
     for sig in final:
         log.info(
             "SENAL[%s] %s %s score=%s xsec=p%.0f %s",
             sig.tier, sig.side, sig.symbol, sig.score, sig.xsec_pct, sig.src,
         )
         round_sig(bx, sig)
-        await tg.send(fmt_sig(sig, mode))
-        state.mark_signal(sig.symbol)
+
         will_trade = live and equity > 0 and sig.tier == "A"
+        block = ""
+        if will_trade:
+            if not live_ok:
+                block = f"LIVE en pausa: edge en papel sin validar ({edge_txt})"
+            elif not state.can_trade_live(sig.symbol):
+                block = "límite diario/posiciones"
+            elif (config.MAX_SAME_SIDE > 0
+                  and open_side_count(state, sig.side) >= config.MAX_SAME_SIDE):
+                block = f"ya hay {config.MAX_SAME_SIDE} {sig.side} abiertas (correlación)"
+            if block:
+                will_trade = False
+
+        text = fmt_sig(sig, mode, will_trade)
+        if block:
+            text += f"\n⏸ {block} · solo señal"
+        await tg.send(text)
+        state.mark_signal(sig.symbol)
         trk.add(sig, live=will_trade)
 
         if will_trade:
-            if not state.can_trade_live(sig.symbol):
-                await tg.send(f"⏸ {sig.symbol}: límite diario/posiciones, solo señal")
+            oid, note = await try_live_order(bx, sig, equity)
+            if oid:
+                state.mark_trade(
+                    sig.symbol,
+                    {
+                        "side": sig.side,
+                        "entry": sig.entry,
+                        "sl": sig.sl,
+                        "tp": sig.tp2 if config.LIVE_TP == "TP2" else sig.tp1,
+                        "ts": time.time(),
+                        "oid": oid,
+                    },
+                )
+                await tg.send(f"OK Orden <b>{sig.symbol}</b> {sig.side} · {note}")
             else:
-                oid = await try_live_order(bx, sig, equity)
-                if oid:
-                    state.mark_trade(
-                        sig.symbol,
-                        {
-                            "side": sig.side,
-                            "entry": sig.entry,
-                            "sl": sig.sl,
-                            "tp": sig.tp2 if config.LIVE_TP == "TP2" else sig.tp1,
-                            "ts": time.time(),
-                            "oid": oid,
-                        },
-                    )
-                    await tg.send(f"OK Orden <b>{sig.symbol}</b> {sig.side}")
-                else:
-                    await tg.send(f"WARN {sig.symbol} señal OK, orden rechazada")
+                await tg.send(f"WARN {sig.symbol} señal OK, sin orden: {note}")
         await asyncio.sleep(0.4)  # respeta el límite de Telegram
 
     elapsed = time.time() - t0
@@ -326,8 +419,15 @@ async def main() -> None:
         log.warning("LIVE sin claves API -> SIGNAL")
         mode = "SIGNAL"
 
-    signal.signal(signal.SIGTERM, _handle_sig)
-    signal.signal(signal.SIGINT, _handle_sig)
+    # add_signal_handler despierta el bucle al instante; signal.signal + Event.set()
+    # no es seguro entre hilos/bucle y Railway podía acabar matando el proceso
+    # sin parada limpia mientras esperaba la siguiente vela.
+    loop = asyncio.get_running_loop()
+    for sg in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sg, _handle_sig)
+        except NotImplementedError:      # p. ej. Windows
+            signal.signal(sg, _handle_sig)
 
     state = State(config.STATE_PATH)
     trk = Tracker(config.TRACK_PATH)
@@ -347,6 +447,12 @@ async def main() -> None:
             f"BTC-lead={'ON' if config.USE_BTC_LEAD else 'off'} · "
             f"Funding={'ON' if config.USE_FUNDING_EDGE else 'off'}\n"
             f"Máx {config.MAX_SIGNALS_CYCLE} señales/ciclo · score≥{config.MIN_SCORE}"
+            + (
+                f"\nLIVE exige edge en papel: n≥{config.LIVE_MIN_SAMPLES} señales A "
+                f"con E mín {config.LIVE_MIN_EDGE_R:+.2f}R · "
+                f"máx {config.MAX_SAME_SIDE} abiertas por sentido"
+                if mode == "LIVE" and config.LIVE_REQUIRE_EDGE else ""
+            )
         )
 
         last_refresh = last_hb = time.time()
