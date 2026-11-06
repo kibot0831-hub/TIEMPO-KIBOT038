@@ -25,6 +25,20 @@ def _int(n: str, d: int) -> int:
         return d
 
 
+def _path(n: str, d: str) -> str:
+    """Ruta de datos; si el directorio no se puede crear/escribir (sin volumen), usa ./data."""
+    p = os.getenv(n, d).strip()
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        if not os.access(os.path.dirname(p) or ".", os.W_OK):
+            raise OSError("sin permiso de escritura")
+        return p
+    except OSError:
+        fb = os.path.join("data", os.path.basename(p))
+        os.makedirs("data", exist_ok=True)
+        return fb
+
+
 def _list(n: str, d: str) -> tuple[str, ...]:
     return tuple(x.strip().upper() for x in os.getenv(n, d).split(",") if x.strip())
 
@@ -139,12 +153,12 @@ LIVE_EDGE_WINDOW = _int("LIVE_EDGE_WINDOW", 200)       # últimas N señales A q
 
 # ── seguimiento en papel (¿qué habría pasado con cada señal?) ─────────
 TRACK_ENABLED = _bool("TRACK_ENABLED", True)
-TRACK_PATH = os.getenv("TRACK_PATH", "/data/ipda_track.json")
+TRACK_PATH = _path("TRACK_PATH", "/data/ipda_track.json")
 TRACK_TIMEOUT_BARS = _int("TRACK_TIMEOUT_BARS", 48)   # velas hasta dar la señal por caducada
 FEE_RT_PCT = _float("FEE_RT_PCT", 0.10)         # comisión ida+vuelta en % (taker 2x0.05)
 
 # ── infraestructura ───────────────────────────────────────────────────
 HEARTBEAT_MIN = _int("HEARTBEAT_MIN", 240)
-STATE_PATH = os.getenv("STATE_PATH", "/data/ipda_state.json")
+STATE_PATH = _path("STATE_PATH", "/data/ipda_state.json")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 LOG_HTTP = _bool("LOG_HTTP", False)

@@ -41,6 +41,4 @@ Win rate mínimo para esperanza 0: TP1 (1R) = (1 + c)/2 y TP2 (2R) = (1 + c)/3, 
 Con `MIN_RISK_PCT=0.30` y `LIVE_TP=TP1` los stops pequeños necesitan una tasa de acierto muy alta. El tracker mide ambos objetivos: elige el que muestre mejor E con IC95% claramente por encima de 0, y no ajustes filtros con buckets de n < 100 (con tantos desgloses, alguno saldrá «ganador» por azar).
 
 ## Archivos
-bot.py · strategy.py · bingx.py · notify.py · tracker.py · config.py · Procfile · railway.toml · railway_vars.txt · requirements.txt
-
-`tradingview/ipda_v3.pine` → versión Pine v6 de la estrategia para backtest en TradingView (no se despliega en Railway).
+bot.py · strategy.py · bingx.py · notify.py · tracker.py · config.py · Procfile · railway.toml · railway_vars.txt · requirements.txt · .python-version · .gitignore
