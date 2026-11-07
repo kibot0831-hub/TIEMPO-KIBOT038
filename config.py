@@ -62,8 +62,8 @@ class Settings:
     allow_short: bool = True
 
     # Sesión UTC
-    session_start: int = 7
-    session_end: int = 18
+    session_start: int = 0
+    session_end: int = 24
 
     # Riesgo
     risk_pct: float = 0.5
@@ -86,6 +86,7 @@ class Settings:
     bingx_api_secret: str = ""
     state_path: str = "/data/state.json"
     paper_path: str = "/data/paper.json"
+    extra_symbols: str = ""  # CSV: OIL-USDT,XBR-USDT,...
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -115,8 +116,8 @@ class Settings:
             require_btc_align=_b("REQUIRE_BTC_ALIGN", "true"),
             allow_long=_b("ALLOW_LONG", "true"),
             allow_short=_b("ALLOW_SHORT", "true"),
-            session_start=_i("SESSION_START", 7),
-            session_end=_i("SESSION_END", 18),
+            session_start=_i("SESSION_START", 0),
+            session_end=_i("SESSION_END", 24),
             risk_pct=_f("RISK_PCT", 0.5),
             max_trades_day=_i("MAX_TRADES_DAY", 3),
             max_loss_streak=_i("MAX_LOSS_STREAK", 2),
@@ -131,6 +132,7 @@ class Settings:
             bingx_api_secret=os.getenv("BINGX_API_SECRET", "").strip(),
             state_path=os.getenv("STATE_PATH", "/data/state.json"),
             paper_path=os.getenv("PAPER_PATH", "/data/paper.json"),
+            extra_symbols=os.getenv("EXTRA_SYMBOLS", "").strip(),
         )
 
 

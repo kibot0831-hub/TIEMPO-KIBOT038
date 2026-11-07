@@ -1,19 +1,12 @@
-# ═══════════════════════════════════════════════════════════
-# IPDA GRAB Bot — variables Railway (pegar en Variables)
-# Filtros según papel: solo GRAB, score≥85, sin CONT/absorb
-# ═══════════════════════════════════════════════════════════
-
+# IPDA GRAB — 24/7 + Oil/Brent si existe en BingX
 MODE=SIGNAL
 
-# Telegram (obligatorio para señales)
 TELEGRAM_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# BingX (solo si MODE=LIVE)
 BINGX_API_KEY=
 BINGX_API_SECRET=
 
-# Universo
 QUOTE=USDT
 MAX_SYMBOLS=150
 SCAN_SEC=120
@@ -21,45 +14,43 @@ WORKERS=12
 TF_MAIN=15m
 TF_CONFIRM=5m
 
-# Origen — papel
+# 24/7
+SESSION_START=0
+SESSION_END=24
+
+# Origen (ajusta a tu papel)
 ALLOW_GRAB=true
 ALLOW_CONT=false
 ALLOW_B_GRAB=false
 
-# Score
 MIN_SCORE=85
 SHORT_MIN_SCORE=90
 MIN_XSEC_PCT=75
 REQUIRE_NEAR_LEVEL=true
 NEAR_ATR_MAX=0.6
 
-# Absorción off
 ABSORB_BOOST=false
 REQUIRE_ABSORPTION=false
 
-# Confirm 5m
 CONFIRM_REQUIRED=true
 CONFIRM_MODE=reject
 
-# BTC / lados
 REQUIRE_BTC_ALIGN=true
 ALLOW_LONG=true
 ALLOW_SHORT=true
 
-# Sesión UTC
-SESSION_START=7
-SESSION_END=18
+# Oil / Brent (símbolos BingX si existen; el bot los fuerza al universo)
+# Prueba nombres reales en BingX: OIL-USDT, XBR-USDT, BRENT-USDT, UKOIL-USDT
+EXTRA_SYMBOLS=OIL-USDT,XBR-USDT,BRENT-USDT
 
-# Riesgo
 RISK_PCT=0.5
-MAX_TRADES_DAY=3
-MAX_LOSS_STREAK=2
+MAX_TRADES_DAY=6
+MAX_LOSS_STREAK=3
 MAX_DAY_LOSS_PCT=2.0
 MIN_RR=1.5
 TP1_R=1.0
 TP2_R=2.0
 SL_ATR_BUF=0.35
 
-# Persistencia (volume Railway en /data)
 STATE_PATH=/data/state.json
 PAPER_PATH=/data/paper.json

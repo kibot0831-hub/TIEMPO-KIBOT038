@@ -92,17 +92,32 @@ async def pick_symbols(bx: BingX) -> list[str]:
     tickers = await bx.swap_tickers()
     quote = settings.quote
     rows = []
+    all_syms = set()
     for t in tickers:
         sym = (t.get("symbol") or "").upper()
         if not sym.endswith(f"-{quote}"):
-            continue
+            # también aceptar símbolos commodity tipo XBR-USDT si el quote coincide
+            if f"-{quote}" not in sym and not sym.endswith(quote):
+                continue
         try:
             vol = float(t.get("quoteVolume") or t.get("volume") or 0)
         except (TypeError, ValueError):
             vol = 0.0
         rows.append((sym, vol))
+        all_syms.add(sym)
     rows.sort(key=lambda x: x[1], reverse=True)
-    return [s for s, _ in rows[: settings.max_symbols]]
+    out = [s for s, _ in rows[: settings.max_symbols]]
+    # EXTRA_SYMBOLS: OIL-USDT,XBR-USDT,BRENT-USDT,...
+    for raw in (settings.extra_symbols or "").split(","):
+        s = raw.strip().upper().replace("/", "-").replace("_", "-")
+        if not s:
+            continue
+        if not s.endswith(f"-{quote}") and quote not in s:
+            s = f"{s}-{quote}" if "-" not in s else s
+        if s not in out:
+            out.insert(0, s)
+            log.info("extra symbol forzado: %s", s)
+    return out
 
 
 async def scan_symbol(
@@ -167,7 +182,8 @@ async def scan_symbol(
 async def run_cycle(bx: BingX, state: State) -> dict[str, Any]:
     t0 = time.time()
     if not _in_session():
-        return {"n_sym": 0, "cycle_s": 0, "skipped": "session"}
+        log.info("fuera de sesión UTC hour=%s window=%s-%s", _utc_hour(), settings.session_start, settings.session_end)
+        return {"n_sym": 0, "cycle_s": 0, "skipped": "session", "hour_utc": _utc_hour()}
 
     if state.data.get("trades_today", 0) >= settings.max_trades_day:
         return {"n_sym": 0, "cycle_s": 0, "skipped": "max_trades"}
@@ -241,14 +257,27 @@ async def run_cycle(bx: BingX, state: State) -> dict[str, Any]:
 
 async def main() -> None:
     log.info(
-        "IPDA GRAB bot arranque MODE=%s MIN_SCORE=%s SHORT_MIN=%s CONT=%s",
+        "IPDA GRAB bot arranque MODE=%s MIN_SCORE=%s SHORT_MIN=%s CONT=%s SESSION=%s-%s",
         settings.mode,
         settings.min_score,
         settings.short_min_score,
         settings.allow_cont,
+        settings.session_start,
+        settings.session_end,
     )
     bx = BingX(settings.bingx_api_key, settings.bingx_api_secret)
     state = State()
+    await send_telegram(
+        settings.telegram_token,
+        settings.telegram_chat_id,
+        (
+            f"🤖 <b>IPDA GRAB arrancado</b>\n"
+            f"MODE={settings.mode} · sesión {settings.session_start}-{settings.session_end} UTC\n"
+            f"MIN_SCORE={settings.min_score} · SHORT={settings.short_min_score}\n"
+            f"CONT={settings.allow_cont} · SCAN={settings.scan_sec}s\n"
+            f"Extra: {settings.extra_symbols or '—'}"
+        ),
+    )
     hb_every = max(1, int(1800 / max(settings.scan_sec, 30)))  # ~30 min
     n = 0
     try:
