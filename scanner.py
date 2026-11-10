@@ -76,7 +76,9 @@ class Scanner:
             except Exception as e:
                 log.warning("No se pudo refrescar el universo: %s", e)
 
-        syms = list(self.universe)
+        # Símbolos con operación abierta que ya no están en el universo (bajó el volumen, etc.)
+        # se siguen igualmente hasta cerrar la operación; solo NO generan señales nuevas.
+        syms = list(self.universe) + [s for s in self.tracker.trades if s not in self.universe]
         results = await asyncio.gather(*(self._load(s) for s in syms))
         now_ms = int(time.time() * 1000)
 
@@ -94,14 +96,21 @@ class Scanner:
                 rejects["pocas_velas"] += 1
                 continue
             last_close_ms = closed[-1].t + self.ltf_ms
-            if not once and now_ms - last_close_ms > 2 * self.ltf_ms:
+            stale = (not once) and now_ms - last_close_ms > 2 * self.ltf_ms
+            tracked = self.tracker.has_open(sym) is not None
+            if stale and not tracked:
                 rejects["sin_datos_recientes"] += 1  # mercado parado / contrato ilíquido
                 continue
 
             S = build_series(closed, cfg)
             # 1) seguimiento de operaciones abiertas (TP / SL / CBC cambia de color / tiempo máx.)
-            for tr, ev in self.tracker.update(sym, closed, S.cbc):
+            for tr, ev in self.tracker.update(sym, closed, S.cbc, now_ms):
                 notifications.append(format_event(tr, ev, cfg, self.tracker.stats_line()))
+            if sym not in self.universe:
+                continue  # solo seguimiento: fuera del universo no se abren operaciones nuevas
+            if stale:
+                rejects["sin_datos_recientes"] += 1
+                continue
 
             # 2) señal nueva en la última vela cerrada
             sig, why = evaluate(S, len(closed) - 1, cfg, sym)

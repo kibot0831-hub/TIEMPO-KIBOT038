@@ -131,7 +131,12 @@ def summarize(trades: List[dict]) -> None:
         by_sym[t["symbol"]] = by_sym.get(t["symbol"], 0.0) + t["r"]
     best = sorted(by_sym.items(), key=lambda x: x[1], reverse=True)
     print("Mejores símbolos:   " + ", ".join(f"{s} {r:+.1f}R" for s, r in best[:5]))
-    print("Peores símbolos:    " + ", ".join(f"{s} {r:+.1f}R" for s, r in best[-5:]))
+    print("Peores símbolos:    " + ", ".join(f"{s} {r:+.1f}R" for s, r in best[::-1][:5]))
+    for side in ("LONG", "SHORT"):
+        sr = [t["r"] for t in trades if t["side"] == side]
+        if sr:
+            print(f"  {side:5s}: {len(sr)} ops · {sum(sr):+.1f}R · {sum(sr)/len(sr):+.3f} R/op · "
+                  f"winrate {100*sum(r > 0.05 for r in sr)/len(sr):.0f}%")
     print("================================================================")
     print("Aviso: el pasado no garantiza resultados futuros. Si en una vela se tocan SL y TP,")
     print("se asume SL primero (conservador). No incluye slippage ni funding.")

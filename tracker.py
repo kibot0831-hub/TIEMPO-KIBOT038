@@ -142,12 +142,14 @@ class Tracker:
             self.stats["be"] += 1
 
     def update(self, symbol: str, closed: List[Candle],
-               cbc: Optional[List[bool]] = None) -> List[Tuple[Trade, Event]]:
+               cbc: Optional[List[bool]] = None, now_ms: Optional[int] = None) -> List[Tuple[Trade, Event]]:
         """Procesa las velas nuevas de `symbol`. Devuelve eventos para notificar.
 
         `cbc` (opcional): estado CBC LTF alineado con `closed`. Si la estrategia es pullback y
         EXIT_ON_CBC_FLIP está activo, la operación se cierra al cierre de la primera vela en la
         que el CBC cambia de color en contra (mismo criterio que el backtest).
+        `now_ms` (opcional, solo en vivo): reloj real, para que el tiempo máximo también se
+        cumpla si el contrato se queda sin velas nuevas (mercado parado).
         """
         tr = self.trades.get(symbol)
         out: List[Tuple[Trade, Event]] = []
@@ -169,6 +171,8 @@ class Tracker:
                 break
         if not tr.closed and self.cfg.max_trade_hours > 0:
             now_edge = closed[-1].t + self.ltf_ms
+            if now_ms is not None:
+                now_edge = max(now_edge, now_ms)
             if now_edge - tr.opened_ms >= self.cfg.max_trade_hours * 3_600_000:
                 out.append((tr, close_trade_at(tr, closed[-1].c, "TIMEOUT")))
         for t_, ev in out:

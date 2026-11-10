@@ -77,6 +77,34 @@ class TestLiveLoop(unittest.TestCase):
         self.assertIsNone(tracker.has_open("TEST-USDT"))
         self.assertEqual(tracker.stats["n"], 1)
 
+    def test_open_trade_still_tracked_when_symbol_leaves_universe(self):
+        cfg = mk_cfg()
+        boundary = (NOW0 * 1000 // LTF) * LTF
+        rows = series_ending_at(boundary)
+        last = rows[-1]
+        rows[-1] = Candle(last.t, last.o + 0.8, last.o + 0.9, last.o + 0.4, last.o + 0.5, 1000.0)
+        bingx, tg = FakeBingX(), FakeTG()
+        bingx.candles["TEST-USDT"] = rows
+        bingx.candles["OTRO-USDT"] = series_ending_at(boundary)
+        tracker = Tracker(cfg)
+        sc = Scanner(cfg, bingx, tg, tracker)
+        sc.universe = {"TEST-USDT": SymbolMeta("TEST-USDT", price_prec=2)}
+        sc._universe_ts = 1e18
+        with mock.patch("time.time", return_value=boundary / 1000 + 5):
+            asyncio.run(sc.scan_once())
+        self.assertIsNotNone(tracker.has_open("TEST-USDT"))
+
+        # el símbolo sale del universo; la vela siguiente rompe el mínimo (CBC -> rojo)
+        sc.universe = {"OTRO-USDT": SymbolMeta("OTRO-USDT", price_prec=2)}
+        prev = rows[-1]
+        c = prev.l - 0.02
+        bingx.candles["TEST-USDT"] = rows + [Candle(prev.t + LTF, prev.c, prev.c, c - 0.01, c, 1000.0)]
+        bingx.candles["OTRO-USDT"] = series_ending_at(boundary + LTF)
+        with mock.patch("time.time", return_value=(boundary + LTF) / 1000 + 5):
+            asyncio.run(sc.scan_once())
+        self.assertIsNone(tracker.has_open("TEST-USDT"))
+        self.assertTrue(any("CBC cambió a ROJO" in m for m in tg.sent), tg.sent)
+
     def test_no_signal_on_green_candle(self):
         cfg = mk_cfg()
         boundary = (NOW0 * 1000 // LTF) * LTF

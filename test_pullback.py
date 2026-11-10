@@ -3,7 +3,7 @@
   CBC verde  + vela roja  cerrada -> LONG
   CBC rojo   + vela verde cerrada -> SHORT
 
-Ejecutar:  python -m unittest discover -s tests -t .
+Ejecutar:  python -m unittest discover -p "test_*.py"
 """
 from __future__ import annotations
 
@@ -291,6 +291,48 @@ class TestBacktestInvariants(unittest.TestCase):
             self.assertEqual((a is None), (b is None), f"i={i}")
             if a is not None:
                 self.assertEqual((a.side, round(a.sl, 9), round(a.entry, 9)), (b.side, round(b.sl, 9), round(b.entry, 9)))
+
+
+class TestRuleIndependentCheck(unittest.TestCase):
+    """Reimplementa la regla desde cero (sin usar strategy.py) y exige que coincida 1:1."""
+
+    def test_signals_match_independent_rule(self):
+        rnd = random.Random(2024)
+        rows, px = [], 100.0
+        for k in range(2500):
+            o = px
+            c = o * (1 + rnd.gauss(0, 0.004))
+            h = max(o, c) * (1 + abs(rnd.gauss(0, 0.0015)))
+            l = min(o, c) * (1 - abs(rnd.gauss(0, 0.0015)))
+            rows.append(Candle(T0 + k * LTF, o, h, l, c, 1000.0))
+            px = c
+        # sin filtros: solo el disparador puro
+        cfg = mk_cfg(min_score=0, min_room_r=0.0, skip_wide_sl=False)
+        S = build_series(rows, cfg)
+
+        # CBC independiente: verde si cierra > máx. anterior, rojo si cierra < mín. anterior
+        state, cbc = False, [False]
+        for i in range(1, len(rows)):
+            if rows[i].c > rows[i - 1].h:
+                state = True
+            elif rows[i].c < rows[i - 1].l:
+                state = False
+            cbc.append(state)
+
+        longs = shorts = 0
+        for i in range(MIN_BARS, len(rows)):
+            red, green = rows[i].c < rows[i].o, rows[i].c > rows[i].o
+            exp = None
+            if cbc[i] and cbc[i - 1] and red:
+                exp = "LONG"
+            elif (not cbc[i]) and (not cbc[i - 1]) and green:
+                exp = "SHORT"
+            sig, _ = evaluate(S, i, cfg, "X")
+            self.assertEqual(sig.side if sig else None, exp, f"vela {i}")
+            longs += exp == "LONG"
+            shorts += exp == "SHORT"
+        self.assertGreater(longs, 50)
+        self.assertGreater(shorts, 50)
 
 
 class TestMessages(unittest.TestCase):
