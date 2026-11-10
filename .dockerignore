@@ -2,5 +2,5 @@
 .env
 __pycache__
 *.pyc
-tests
+test_*.py
 state.json

@@ -1,250 +1,194 @@
-"""
-Seguimiento en papel de TODAS las señales emitidas (tier A y B, SIGNAL y LIVE).
+"""Seguimiento de operaciones: avisa de TP / SL / breakeven / salida por señal contraria.
 
-Sin esto no hay forma de saber si el bot es fiable: en MODE=SIGNAL el bot no
-mide qué pasó después de cada aviso, y en LIVE `reconcile` solo compara el
-precio actual con la entrada. Aquí cada señal se resuelve contra las velas que
-el bot YA descarga en cada ciclo (cero peticiones extra a BingX).
-
-Reglas de resolución (conservadoras):
-  · entrada = precio de cierre de la vela de la señal (como en el aviso)
-  · se recorren las velas CERRADAS posteriores, en orden
-  · si SL y TP caen en la misma vela, cuenta SL
-  · dos resultados independientes por señal: «TP1 vs SL» y «TP2 vs SL»
-  · caducidad a TRACK_TIMEOUT_BARS velas: se valora a precio de mercado (EXP)
-  · R neto = R bruto − FEE_RT_PCT / riesgo%  (las comisiones pesan más cuanto
-    más pequeño es el stop)
-
-v3.2: cada esperanza se publica con su IC95% (E ± x R) y se marca con ⚠ cuando
-n es menor de 30: con pocas señales un E positivo es casi siempre ruido.
-`edge()` expone la esperanza reciente del tier A para que el bot decida si
-LIVE está validado (LIVE_REQUIRE_EDGE).
+`step_trade` es una función pura que usan tanto el bot en vivo como el backtest.
+Regla conservadora: si en una misma vela se tocan SL y TP, se asume que se tocó el SL primero.
 """
 from __future__ import annotations
 
 import json
 import logging
-import time
-from collections import defaultdict
-from pathlib import Path
-from typing import Any
+import os
+from dataclasses import asdict
+from typing import Dict, List, Optional, Tuple
 
-import config
+from config import Config
+from models import Candle, Event, Signal, Trade
+from strategy import cbc_against
 
 log = logging.getLogger("tracker")
 
-MAX_DONE = 3000          # histórico de señales resueltas que se conserva
+
+def new_trade(sig: Signal, ltf_ms: int, price_prec: Optional[int] = None) -> Trade:
+    return Trade(
+        symbol=sig.symbol, side=sig.side, entry=sig.entry, sl=sig.sl, sl0=sig.sl,
+        tps=list(sig.tps), risk=sig.risk, t_signal=sig.t, t_last=sig.t,
+        opened_ms=sig.t + ltf_ms, hits=[False] * len(sig.tps), price_prec=price_prec,
+    )
+
+
+def _r_at(tr: Trade, price: float) -> float:
+    d = (price - tr.entry) if tr.side == "LONG" else (tr.entry - price)
+    return d / tr.risk
+
+
+def step_trade(tr: Trade, c: Candle, cfg: Config) -> List[Event]:
+    """Procesa UNA vela cerrada posterior a la entrada."""
+    events: List[Event] = []
+    if tr.closed or c.t <= tr.t_last:
+        return events
+    tr.t_last = c.t
+    is_long = tr.side == "LONG"
+
+    # 1) Stop primero (conservador)
+    if (c.l <= tr.sl) if is_long else (c.h >= tr.sl):
+        exit_r = _r_at(tr, tr.sl)
+        total = tr.realized_r + tr.remaining * exit_r
+        kind = "SL" if exit_r < -1e-9 else "BE"
+        tr.closed = True
+        events.append(Event(kind, price=tr.sl, r=exit_r, final=True, total_r=total))
+        return events
+
+    # 2) Take profits en orden
+    for idx, tp in enumerate(tr.tps):
+        if tr.hits[idx]:
+            continue
+        reached = (c.h >= tp) if is_long else (c.l <= tp)
+        if not reached:
+            break
+        tr.hits[idx] = True
+        frac = cfg.tp_split[idx] if idx < len(cfg.tp_split) else 1.0 / len(tr.tps)
+        r_i = cfg.tp_r[idx] if idx < len(cfg.tp_r) else abs(_r_at(tr, tp))
+        tr.realized_r += frac * r_i
+        tr.remaining = max(0.0, tr.remaining - frac)
+        last = all(tr.hits)
+        if last:
+            tr.closed = True
+        events.append(Event("TP", n=idx + 1, price=tp, r=r_i, final=last,
+                            total_r=tr.realized_r if last else 0.0))
+        if idx == 0 and cfg.move_sl_to_be:
+            tr.sl = tr.entry
+    return events
+
+
+def close_trade_at(tr: Trade, price: float, kind: str) -> Event:
+    """Cierra lo que quede de la operación a `price` (señal contraria / flip CBC / tiempo máximo)."""
+    exit_r = _r_at(tr, price)
+    total = tr.realized_r + tr.remaining * exit_r
+    tr.closed = True
+    return Event(kind, price=price, r=exit_r, final=True, total_r=total)
 
 
 class Tracker:
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        self.data: dict[str, Any] = {"pending": [], "done": []}
-        self._load()
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.ltf_ms = cfg.ltf_sec * 1000
+        self.trades: Dict[str, Trade] = {}
+        self.last_alert: Dict[str, int] = {}
+        self.stats = {"n": 0, "wins": 0, "losses": 0, "be": 0, "sum_r": 0.0}
+        self.load()
 
-    # ── persistencia ──────────────────────────────────────────────────
-    def _load(self) -> None:
+    # ---- persistencia ----------------------------------------------------------------
+    def load(self) -> None:
+        path = self.cfg.state_file
+        if not path or not os.path.exists(path):
+            return
         try:
-            if self.path.exists():
-                d = json.loads(self.path.read_text())
-                self.data["pending"] = list(d.get("pending", []))
-                self.data["done"] = list(d.get("done", []))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Tracker load: %s", exc)
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self.trades = {k: Trade(**v) for k, v in d.get("trades", {}).items()}
+            self.last_alert = {k: int(v) for k, v in d.get("last_alert", {}).items()}
+            self.stats.update(d.get("stats", {}))
+            log.info("Estado cargado: %d operaciones abiertas", len(self.trades))
+        except Exception as e:  # estado corrupto: se ignora
+            log.warning("No se pudo leer %s: %s", path, e)
 
     def save(self) -> None:
+        if self.cfg.dry_run or not self.cfg.state_file:
+            return
+        data = {
+            "trades": {k: asdict(v) for k, v in self.trades.items()},
+            "last_alert": self.last_alert,
+            "stats": self.stats,
+        }
+        tmp = self.cfg.state_file + ".tmp"
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data))
-            tmp.replace(self.path)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Tracker save: %s", exc)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.cfg.state_file)
+        except Exception as e:
+            log.warning("No se pudo guardar el estado: %s", e)
 
-    # ── alta ──────────────────────────────────────────────────────────
-    def add(self, s, live: bool = False) -> None:
-        if not config.TRACK_ENABLED:
-            return
-        if any(p["sym"] == s.symbol and p["bar"] == s.bar_time for p in self.data["pending"]):
-            return
-        self.data["pending"].append(
-            {
-                "sym": s.symbol, "side": s.side, "tier": s.tier, "src": s.src,
-                "entry": s.entry, "sl": s.sl, "tp1": s.tp1, "tp2": s.tp2,
-                "bar": s.bar_time, "ts": time.time(),
-                "score": s.score, "xsec": round(s.xsec_pct, 1), "rvol": round(s.rvol, 2),
-                "btc": s.btc_state, "trend": s.trend, "abs": bool(s.absorb),
-                "risk": round(s.risk_pct, 3), "dist": round(s.dist_atr, 2),
-                "fmin": round(s.funding_min), "fpts": int(getattr(s, "fpts", 0)),
-                "live": bool(live),
-                "o1": None, "o2": None,
-            }
-        )
-        self.save()
+    # ---- API ---------------------------------------------------------------------------
+    def has_open(self, symbol: str) -> Optional[Trade]:
+        return self.trades.get(symbol)
 
-    # ── resolución ────────────────────────────────────────────────────
-    @staticmethod
-    def _walk(p: dict, bars: list[dict]) -> None:
-        """Recorre velas cerradas en orden y fija p['o1'] / p['o2'] (TP | SL)."""
-        long = p["side"] == "LONG"
-        for r in bars:
-            hi, lo = r["high"], r["low"]
-            sl_hit = lo <= p["sl"] if long else hi >= p["sl"]
-            t1 = hi >= p["tp1"] if long else lo <= p["tp1"]
-            t2 = hi >= p["tp2"] if long else lo <= p["tp2"]
-            if p["o1"] is None:
-                if sl_hit:
-                    p["o1"] = "SL"
-                elif t1:
-                    p["o1"] = "TP"
-            if p["o2"] is None:
-                if sl_hit:
-                    p["o2"] = "SL"
-                elif t2:
-                    p["o2"] = "TP"
-            if p["o1"] and p["o2"]:
-                return
+    def already_alerted(self, symbol: str, side: str, t: int) -> bool:
+        return self.last_alert.get(f"{symbol}|{side}", -1) >= t
 
-    @staticmethod
-    def _r(p: dict, outcome: str, tp_price: float, px: float) -> float:
-        """R neto de comisiones para un resultado."""
-        long = p["side"] == "LONG"
-        risk_px = abs(p["entry"] - p["sl"]) or 1e-12
-        if outcome == "TP":
-            gross = abs(tp_price - p["entry"]) / risk_px
-        elif outcome == "SL":
-            gross = -1.0
-        else:  # EXP: precio de mercado, acotado entre -1R y el objetivo
-            mtm = ((px - p["entry"]) if long else (p["entry"] - px)) / risk_px
-            gross = max(-1.0, min(abs(tp_price - p["entry"]) / risk_px, mtm))
-        cost = config.FEE_RT_PCT / p["risk"] if p.get("risk", 0) > 0 else 0.0
-        return gross - cost
+    def register(self, sig: Signal, price_prec: Optional[int]) -> None:
+        self.last_alert[f"{sig.symbol}|{sig.side}"] = sig.t
+        if self.cfg.track_trades:
+            self.trades[sig.symbol] = new_trade(sig, self.ltf_ms, price_prec)
 
-    def resolve(self, data: dict[str, list[dict]], now: float | None = None) -> int:
-        """Resuelve pendientes con las velas del ciclo. Devuelve cuántas cerró."""
-        if not self.data["pending"]:
-            return 0
-        now = now if now is not None else time.time()
-        now_ms = now * 1000.0
-        tf_ms = config.TF_SEC * 1000
-        limit = max(1, config.TRACK_TIMEOUT_BARS)
+    def _finalize(self, tr: Trade, ev: Event) -> None:
+        self.trades.pop(tr.symbol, None)
+        self.stats["n"] += 1
+        self.stats["sum_r"] += ev.total_r
+        if ev.total_r > 0.05:
+            self.stats["wins"] += 1
+        elif ev.total_r < -0.05:
+            self.stats["losses"] += 1
+        else:
+            self.stats["be"] += 1
 
-        still: list[dict] = []
-        closed = 0
-        for p in self.data["pending"]:
-            rows = data.get(p["sym"])
-            if not rows:
-                # sin datos (par fuera del universo, fallo de red): se espera, pero no eternamente
-                if now - p["ts"] > (limit + 12) * config.TF_SEC:
-                    closed += 1
-                    log.info("track %s: sin datos, descartada", p["sym"])
-                else:
-                    still.append(p)
-                continue
+    def update(self, symbol: str, closed: List[Candle],
+               cbc: Optional[List[bool]] = None) -> List[Tuple[Trade, Event]]:
+        """Procesa las velas nuevas de `symbol`. Devuelve eventos para notificar.
 
-            bars = [r for r in rows if r["time"] > p["bar"] and r["time"] + tf_ms <= now_ms]
-            bars.sort(key=lambda r: r["time"])
-            bars = bars[:limit]
-            self._walk(p, bars)
-            expired = len(bars) >= limit
-            done1, done2 = p["o1"] is not None, p["o2"] is not None
+        `cbc` (opcional): estado CBC LTF alineado con `closed`. Si la estrategia es pullback y
+        EXIT_ON_CBC_FLIP está activo, la operación se cierra al cierre de la primera vela en la
+        que el CBC cambia de color en contra (mismo criterio que el backtest).
+        """
+        tr = self.trades.get(symbol)
+        out: List[Tuple[Trade, Event]] = []
+        if tr is None or not closed:
+            return out
+        first = len(closed)
+        while first > 0 and closed[first - 1].t > tr.t_last:
+            first -= 1
+        flip_exit = (cbc is not None and len(cbc) == len(closed)
+                     and self.cfg.strategy == "pullback" and self.cfg.exit_on_cbc_flip)
+        for k in range(first, len(closed)):
+            cd = closed[k]
+            for ev in step_trade(tr, cd, self.cfg):
+                out.append((tr, ev))
+            if tr.closed:
+                break
+            if flip_exit and cbc_against(tr.side, cbc[k]):
+                out.append((tr, close_trade_at(tr, cd.c, "FLIP")))
+                break
+        if not tr.closed and self.cfg.max_trade_hours > 0:
+            now_edge = closed[-1].t + self.ltf_ms
+            if now_edge - tr.opened_ms >= self.cfg.max_trade_hours * 3_600_000:
+                out.append((tr, close_trade_at(tr, closed[-1].c, "TIMEOUT")))
+        for t_, ev in out:
+            if ev.final:
+                self._finalize(t_, ev)
+        return out
 
-            if (done1 and done2) or expired:
-                px = bars[-1]["close"] if bars else p["entry"]
-                o1 = p["o1"] or "EXP"
-                o2 = p["o2"] or "EXP"
-                rec = {k: p[k] for k in (
-                    "sym", "side", "tier", "src", "score", "xsec", "rvol", "btc",
-                    "trend", "abs", "risk", "dist", "fmin", "live", "ts")}
-                rec.update(
-                    fpts=p.get("fpts", 0), o1=o1, o2=o2,
-                    r1=round(self._r(p, o1, p["tp1"], px), 3),
-                    r2=round(self._r(p, o2, p["tp2"], px), 3),
-                )
-                self.data["done"].append(rec)
-                closed += 1
-                log.info("track %s %s [%s/%s]: TP1→%s TP2→%s", p["sym"], p["side"],
-                         p["tier"], p["src"], o1, o2)
-            else:
-                still.append(p)
+    def close_opposite(self, symbol: str, price: float, kind: str = "OPPOSITE") -> Optional[Tuple[Trade, Event]]:
+        """Cierra lo que quede a `price`. kind: OPPOSITE (señal contraria) | FLIP (CBC cambió de color)."""
+        tr = self.trades.get(symbol)
+        if tr is None:
+            return None
+        ev = close_trade_at(tr, price, kind)
+        self._finalize(tr, ev)
+        return tr, ev
 
-        self.data["pending"] = still
-        self.data["done"] = self.data["done"][-MAX_DONE:]
-        if closed:
-            self.save()
-        return closed
-
-    # ── estadística ───────────────────────────────────────────────────
-    @staticmethod
-    def _stats(xs: list[float]) -> tuple[float, float]:
-        """(media, semiancho del IC95%) de una lista de R."""
-        n = len(xs)
-        if n == 0:
-            return 0.0, 0.0
-        m = sum(xs) / n
-        if n < 2:
-            return m, 0.0
-        sd = (sum((x - m) ** 2 for x in xs) / (n - 1)) ** 0.5
-        return m, 1.96 * sd / n ** 0.5
-
-    def edge(self, tier: str = "A", tp: str = "TP1", last: int = 200) -> tuple[int, float, float]:
-        """(n, esperanza media en R, semiancho IC95%) de las últimas `last` señales del tier."""
-        k = "r2" if tp == "TP2" else "r1"
-        xs = [d[k] for d in self.data["done"] if d.get("tier") == tier][-max(1, last):]
-        m, ci = self._stats(xs)
-        return len(xs), m, ci
-
-    # ── informe ───────────────────────────────────────────────────────
-    @classmethod
-    def _line(cls, label: str, items: list[dict]) -> str:
-        n = len(items)
-
-        def part(o_key: str, r_key: str) -> str:
-            dec = [d for d in items if d[o_key] in ("TP", "SL")]
-            win = sum(1 for d in dec if d[o_key] == "TP")
-            wr = f"{win / len(dec) * 100:.0f}%" if dec else "n/a"
-            m, ci = cls._stats([d[r_key] for d in items])
-            return f"{wr} E{m:+.2f}±{ci:.2f}R"
-
-        warn = "⚠" if n < 30 else ""
-        return f"{label}: n={n}{warn} · TP1 {part('o1', 'r1')} · TP2 {part('o2', 'r2')}"
-
-    def _group(self, key, min_n: int = 5) -> list[str]:
-        g: dict[str, list[dict]] = defaultdict(list)
-        for d in self.data["done"]:
-            g[key(d)].append(d)
-        return [self._line(k, v) for k, v in sorted(g.items()) if len(v) >= min_n]
-
-    @staticmethod
-    def _funding_bucket(d: dict) -> str:
-        if d.get("fmin", 999) > 45:
-            return "funding: fuera de ventana"
-        f = d.get("fpts", 0)
-        return "funding a favor" if f > 0 else "funding en contra" if f < 0 else "funding neutro"
-
-    def summary(self) -> str:
-        done = self.data["done"]
-        pend = len(self.data["pending"])
-        if not done:
-            return f"Seguimiento: sin señales resueltas aún ({pend} en curso)"
-        lines = [f"Seguimiento en papel · {len(done)} resueltas · {pend} en curso",
-                 "(E = esperanza en R neta de comisiones ± IC95%; ⚠ = n menor de 30, "
-                 "no concluyente; win% sin contar caducadas)"]
-        lines += self._group(lambda d: f"{d['tier']}·{d['src']}", min_n=1)
-        if len(done) >= 30:
-            lines.append("— desglose —")
-            lines += self._group(lambda d: d["side"])
-            lines += self._group(lambda d: f"BTC {d['btc']}")
-            lines += self._group(lambda d: f"tend {d['trend']}")
-            lines += self._group(lambda d: "absorción" if d["abs"] else "sin absorción")
-            lines += self._group(
-                lambda d: "p<50" if d["xsec"] < 50 else "p50-75" if d["xsec"] < 75
-                else "p75-90" if d["xsec"] < 90 else "p90+")
-            lines += self._group(lambda d: "score menor de 70" if d["score"] < 70
-                                 else "score 70-79" if d["score"] < 80 else "score 80+")
-            lines += self._group(self._funding_bucket)
-            lines += self._group(lambda d: "stop corto (riesgo menor de 0.5%)" if d["risk"] < 0.5
-                                 else "stop normal (riesgo 0.5% o más)")
-            lines += self._group(lambda d: "entrada cerca del nivel" if d["dist"] <= config.NEAR_ATR
-                                 else "entrada lejos del nivel")
-        return "\n".join(lines).replace("<", "‹").replace(">", "›").replace("&", "y")  # HTML de Telegram
+    def stats_line(self) -> str:
+        s = self.stats
+        if s["n"] == 0:
+            return "Estadística del bot: sin operaciones cerradas aún"
+        wr = 100.0 * s["wins"] / s["n"]
+        return (f"Estadística del bot: {s['n']} cerradas · {s['wins']}W/{s['losses']}L/{s['be']}BE "
+                f"· winrate {wr:.0f}% · acumulado {s['sum_r']:+.2f}R")

@@ -1,139 +1,179 @@
-"""IPDA GRAB Bot — config desde variables de entorno (Railway)."""
+"""Configuración por variables de entorno (ver .env.example)."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Tuple
+
+# Intervalos soportados por BingX (el "10m" del indicador original NO existe en BingX).
+TF_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800,
+    "12h": 43200, "1d": 86400,
+}
+
+MAX_SCORE = 4  # EMA cloud + VWAP + EMA200 + EMA cloud HTF
 
 
-def _b(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+def _env(name: str, default: str = "") -> str:
+    v = os.getenv(name)
+    return default if v is None or v.strip() == "" else v.strip()
 
 
-def _f(name: str, default: float) -> float:
+def _bool(name: str, default: bool) -> bool:
+    v = _env(name, "")
+    if v == "":
+        return default
+    return v.lower() in ("1", "true", "yes", "y", "on", "si", "sí")
+
+
+def _int(name: str, default: int) -> int:
     try:
-        return float(os.getenv(name, str(default)))
+        return int(float(_env(name, str(default))))
     except ValueError:
         return default
 
 
-def _i(name: str, default: int) -> int:
+def _float(name: str, default: float) -> float:
     try:
-        return int(os.getenv(name, str(default)))
+        return float(_env(name, str(default)))
     except ValueError:
         return default
+
+
+def _list(name: str, default: str) -> Tuple[str, ...]:
+    raw = _env(name, default)
+    return tuple(x.strip().upper() for x in raw.split(",") if x.strip())
+
+
+def _floats(name: str, default: str) -> Tuple[float, ...]:
+    out = []
+    for x in _env(name, default).split(","):
+        x = x.strip()
+        if x:
+            try:
+                out.append(float(x))
+            except ValueError:
+                pass
+    return tuple(out)
 
 
 @dataclass(frozen=True)
-class Settings:
-    # Modo: SIGNAL = solo Telegram | PAPER = simula fills | LIVE = órdenes BingX
-    mode: str = "SIGNAL"
-
-    # Universo / cadencia
-    quote: str = "USDT"
-    max_symbols: int = 150
-    scan_sec: int = 120
-    workers: int = 12
-    tf_main: str = "15m"
-    tf_confirm: str = "5m"
-
-    # Origen — papel: solo GRAB
-    allow_grab: bool = True
-    allow_cont: bool = False
-    allow_b_grab: bool = False
-
-    # Score / calidad
-    min_score: int = 85
-    short_min_score: int = 90
-    min_xsec_pct: float = 75.0
-    require_near_level: bool = True
-    near_atr_max: float = 0.6
-
-    # Absorción (papel empeora E → off)
-    absorb_boost: bool = False
-    require_absorption: bool = False
-
-    # Confirmación 5m
-    confirm_required: bool = True
-    confirm_mode: str = "reject"  # reject | close_back
-
-    # BTC / dirección
-    require_btc_align: bool = True
-    allow_long: bool = True
-    allow_short: bool = True
-
-    # Sesión UTC
-    session_start: int = 0
-    session_end: int = 24
-
-    # Riesgo
-    risk_pct: float = 0.5
-    max_trades_day: int = 3
-    max_loss_streak: int = 2
-    max_day_loss_pct: float = 2.0
-    min_rr: float = 1.5
-    tp1_r: float = 1.0
-    tp2_r: float = 2.0
-    sl_atr_buf: float = 0.35
-
-    # Lookbacks liquidez (velas 15m ~ días)
-    lookback_a: int = 20 * 24 * 4   # ~20d en 15m
-    lookback_b: int = 40 * 24 * 4
-
-    # Telegram / API
-    telegram_token: str = ""
-    telegram_chat_id: str = ""
-    bingx_api_key: str = ""
-    bingx_api_secret: str = ""
-    state_path: str = "/data/state.json"
-    paper_path: str = "/data/paper.json"
-    extra_symbols: str = ""  # CSV: OIL-USDT,XBR-USDT,...
-
-    @classmethod
-    def from_env(cls) -> "Settings":
-        mode = os.getenv("MODE", "SIGNAL").strip().upper()
-        if mode not in {"SIGNAL", "PAPER", "LIVE"}:
-            mode = "SIGNAL"
-        return cls(
-            mode=mode,
-            quote=os.getenv("QUOTE", "USDT").strip().upper(),
-            max_symbols=_i("MAX_SYMBOLS", 150),
-            scan_sec=max(30, _i("SCAN_SEC", 120)),
-            workers=max(2, min(32, _i("WORKERS", 12))),
-            tf_main=os.getenv("TF_MAIN", "15m"),
-            tf_confirm=os.getenv("TF_CONFIRM", "5m"),
-            allow_grab=_b("ALLOW_GRAB", "true"),
-            allow_cont=_b("ALLOW_CONT", "false"),
-            allow_b_grab=_b("ALLOW_B_GRAB", "false"),
-            min_score=_i("MIN_SCORE", 85),
-            short_min_score=_i("SHORT_MIN_SCORE", 90),
-            min_xsec_pct=_f("MIN_XSEC_PCT", 75.0),
-            require_near_level=_b("REQUIRE_NEAR_LEVEL", "true"),
-            near_atr_max=_f("NEAR_ATR_MAX", 0.6),
-            absorb_boost=_b("ABSORB_BOOST", "false"),
-            require_absorption=_b("REQUIRE_ABSORPTION", "false"),
-            confirm_required=_b("CONFIRM_REQUIRED", "true"),
-            confirm_mode=os.getenv("CONFIRM_MODE", "reject").strip().lower(),
-            require_btc_align=_b("REQUIRE_BTC_ALIGN", "true"),
-            allow_long=_b("ALLOW_LONG", "true"),
-            allow_short=_b("ALLOW_SHORT", "true"),
-            session_start=_i("SESSION_START", 0),
-            session_end=_i("SESSION_END", 24),
-            risk_pct=_f("RISK_PCT", 0.5),
-            max_trades_day=_i("MAX_TRADES_DAY", 3),
-            max_loss_streak=_i("MAX_LOSS_STREAK", 2),
-            max_day_loss_pct=_f("MAX_DAY_LOSS_PCT", 2.0),
-            min_rr=_f("MIN_RR", 1.5),
-            tp1_r=_f("TP1_R", 1.0),
-            tp2_r=_f("TP2_R", 2.0),
-            sl_atr_buf=_f("SL_ATR_BUF", 0.35),
-            telegram_token=os.getenv("TELEGRAM_TOKEN", "").strip(),
-            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
-            bingx_api_key=os.getenv("BINGX_API_KEY", "").strip(),
-            bingx_api_secret=os.getenv("BINGX_API_SECRET", "").strip(),
-            state_path=os.getenv("STATE_PATH", "/data/state.json"),
-            paper_path=os.getenv("PAPER_PATH", "/data/paper.json"),
-            extra_symbols=os.getenv("EXTRA_SYMBOLS", "").strip(),
-        )
+class Config:
+    # Telegram
+    telegram_token: str
+    telegram_chat_ids: Tuple[str, ...]
+    # Estrategia: "pullback" (CBC verde -> compra velas rojas / CBC rojo -> vende velas verdes)
+    #             "flip"     (original: entra cuando nace el acuerdo CBC LTF+HTF)
+    strategy: str
+    pullback_require_htf: bool  # pullback: exige además que el CBC del HTF vaya en la misma dirección
+    exit_on_cbc_flip: bool      # pullback: cierra la operación si el CBC LTF cambia de color en contra
+    # Timeframes
+    ltf: str
+    htf: str
+    ltf_sec: int
+    htf_sec: int
+    htf_use_forming: bool
+    # Filtros de señal
+    min_score: int
+    atr_period: int
+    sl_buffer_atr: float
+    min_sl_atr: float
+    max_sl_atr: float
+    skip_wide_sl: bool
+    tp_r: Tuple[float, ...]
+    tp_split: Tuple[float, ...]
+    min_room_r: float
+    move_sl_to_be: bool
+    exit_on_opposite: bool
+    max_trade_hours: float
+    track_trades: bool
+    # Universo
+    min_quote_volume: float
+    max_symbols: int
+    include_oil: bool
+    include_tradfi: bool
+    oil_keywords: Tuple[str, ...]
+    tradfi_prefixes: Tuple[str, ...]
+    extra_symbols: Tuple[str, ...]
+    exclude_symbols: Tuple[str, ...]
+    # Riesgo (solo para calcular tamaño sugerido en el mensaje)
+    account_usdt: float
+    risk_pct: float
+    # Ejecución
+    requests_per_second: float
+    concurrency: int
+    scan_delay_sec: float
+    max_signals_per_scan: int
+    universe_refresh_min: int
+    state_file: str
+    dry_run: bool
+    log_level: str
 
 
-settings = Settings.from_env()
+def load_config() -> Config:
+    ltf = _env("LTF", "15m").lower()
+    htf = _env("HTF", "1h").lower()
+    strategy = _env("STRATEGY", "pullback").lower()
+    if strategy not in ("pullback", "flip"):
+        raise ValueError(f"STRATEGY '{strategy}' no válida. Usa: pullback | flip")
+    if ltf not in TF_SECONDS:
+        raise ValueError(f"LTF '{ltf}' no soportado. Usa: {', '.join(TF_SECONDS)}")
+    if htf not in TF_SECONDS:
+        raise ValueError(f"HTF '{htf}' no soportado. Usa: {', '.join(TF_SECONDS)}")
+    ltf_sec, htf_sec = TF_SECONDS[ltf], TF_SECONDS[htf]
+    if htf_sec < ltf_sec or htf_sec % ltf_sec != 0:
+        raise ValueError(f"HTF ({htf}) debe ser múltiplo de LTF ({ltf}).")
+
+    tp_r = tuple(sorted(x for x in _floats("TP_R", "1,2,3") if x > 0)) or (1.0, 2.0, 3.0)
+    split = _floats("TP_SPLIT", "40,30,30")
+    if len(split) != len(tp_r) or sum(split) <= 0 or any(x < 0 for x in split):
+        split = tuple(1.0 for _ in tp_r)
+    total = sum(split)
+    tp_split = tuple(x / total for x in split)
+
+    chat_ids = tuple(x.strip() for x in _env("TELEGRAM_CHAT_ID", "").split(",") if x.strip())
+
+    return Config(
+        telegram_token=_env("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_ids=chat_ids,
+        strategy=strategy,
+        pullback_require_htf=_bool("PULLBACK_REQUIRE_HTF", False),
+        exit_on_cbc_flip=_bool("EXIT_ON_CBC_FLIP", True),
+        ltf=ltf,
+        htf=htf,
+        ltf_sec=ltf_sec,
+        htf_sec=htf_sec,
+        htf_use_forming=_bool("HTF_USE_FORMING", True),
+        min_score=max(0, min(MAX_SCORE, _int("MIN_SCORE", 3))),
+        atr_period=max(2, _int("ATR_PERIOD", 14)),
+        sl_buffer_atr=max(0.0, _float("SL_BUFFER_ATR", 0.15)),
+        min_sl_atr=max(0.1, _float("MIN_SL_ATR", 0.8)),
+        max_sl_atr=max(0.5, _float("MAX_SL_ATR", 2.5)),
+        skip_wide_sl=_bool("SKIP_WIDE_SL", True),
+        tp_r=tp_r,
+        tp_split=tp_split,
+        min_room_r=max(0.0, _float("MIN_ROOM_R", 1.0)),
+        move_sl_to_be=_bool("MOVE_SL_TO_BE", True),
+        exit_on_opposite=_bool("EXIT_ON_OPPOSITE", True),
+        max_trade_hours=max(0.0, _float("MAX_TRADE_HOURS", 24.0)),
+        track_trades=_bool("TRACK_TRADES", True),
+        min_quote_volume=max(0.0, _float("MIN_QUOTE_VOLUME_USDT", 1_000_000.0)),
+        max_symbols=max(0, _int("MAX_SYMBOLS", 0)),
+        include_oil=_bool("INCLUDE_OIL", True),
+        include_tradfi=_bool("INCLUDE_TRADFI", False),
+        oil_keywords=_list("OIL_KEYWORDS", "OILWTI,OILBRENT,WTI,BRENT,CRUDE,OIL"),
+        tradfi_prefixes=_list("TRADFI_PREFIXES", "NCCO,NCFX,NCSK,NCSI"),
+        extra_symbols=_list("EXTRA_SYMBOLS", ""),
+        exclude_symbols=_list("EXCLUDE_SYMBOLS", ""),
+        account_usdt=max(0.0, _float("ACCOUNT_USDT", 0.0)),
+        risk_pct=max(0.0, _float("RISK_PCT", 1.0)),
+        requests_per_second=max(1.0, _float("REQUESTS_PER_SECOND", 10.0)),
+        concurrency=max(1, _int("CONCURRENCY", 20)),
+        scan_delay_sec=max(0.0, _float("SCAN_DELAY_SEC", 4.0)),
+        max_signals_per_scan=max(1, _int("MAX_SIGNALS_PER_SCAN", 15)),
+        universe_refresh_min=max(5, _int("UNIVERSE_REFRESH_MIN", 60)),
+        state_file=_env("STATE_FILE", "state.json"),
+        dry_run=_bool("DRY_RUN", False),
+        log_level=_env("LOG_LEVEL", "INFO").upper(),
+    )

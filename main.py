@@ -22,12 +22,12 @@ try:  # opcional: leer .env en local
 except ImportError:
     pass
 
-from bot.bingx import BingXClient
-from bot.config import load_config
-from bot.messages import format_startup
-from bot.scanner import Scanner
-from bot.telegram import Telegram
-from bot.tracker import Tracker
+from bingx import BingXClient
+from config import load_config
+from messages import format_startup
+from scanner import Scanner
+from telegram import Telegram
+from tracker import Tracker
 
 
 async def amain(args: argparse.Namespace) -> None:

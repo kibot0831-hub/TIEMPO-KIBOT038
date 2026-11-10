@@ -57,24 +57,26 @@ Además te avisa cuando se alcanza cada TP, el SL, o cuando el CBC cambia de col
 
 ---
 
-## 2. Estructura
+## 2. Estructura (TODOS los archivos van sueltos en la raíz, sin carpetas)
 
 ```
 main.py            arranque (bot, --once, --test-telegram)
 backtest.py        backtest con el mismo motor
-bot/
-  config.py        variables de entorno
-  bingx.py         cliente API pública BingX (contratos, ticker 24h, klines v3)
-  universe.py      criptos + petróleo (detección automática del símbolo)
-  indicators.py    EMA, ATR, VWAP, CBC, agregación HTF
-  strategy.py      motor de señales (pullback / flip) + SL/TP/R:R
-  tracker.py       seguimiento TP/SL/salida por flip CBC y estadística
-  scanner.py       bucle: analiza al cierre de cada vela
-  messages.py      mensajes de Telegram
-  telegram.py      envío
-tests/             pruebas offline (regla pullback, tracker, backtest, scanner simulado)
-Dockerfile, railway.json, requirements.txt, .env.example
+config.py          variables de entorno
+bingx.py           cliente API pública BingX (contratos, ticker 24h, klines v3)
+universe.py        criptos + petróleo (detección automática del símbolo)
+indicators.py      EMA, ATR, VWAP, CBC, agregación HTF
+strategy.py        motor de señales (pullback / flip) + SL/TP/R:R
+tracker.py         seguimiento TP/SL/salida por flip CBC y estadística
+scanner.py         bucle: analiza al cierre de cada vela
+messages.py        mensajes de Telegram
+telegram.py        envío
+models.py          modelos de datos
+test_pullback.py   pruebas offline (regla pullback, tracker, backtest)
+test_scanner.py    prueba offline del bucle en vivo (BingX/Telegram simulados)
+Dockerfile, railway.json, requirements.txt, .env.example, .gitignore, .dockerignore
 ```
+> Si subes a GitHub, sube **todos** los archivos a la raíz del repositorio (nada de subcarpetas).
 
 ---
 
@@ -92,7 +94,7 @@ python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\a
 pip install -r requirements.txt
 cp .env.example .env                                  # edita token y chat id
 
-python -m unittest discover -s tests -t .             # pruebas offline
+python -m unittest discover -p "test_*.py"           # pruebas offline
 python main.py --test-telegram                        # ¿llega un mensaje?
 python main.py --once --dry-run                       # analiza YA y muestra señales en consola
 python main.py                                        # bot en marcha

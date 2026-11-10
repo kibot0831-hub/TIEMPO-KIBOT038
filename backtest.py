@@ -32,12 +32,12 @@ try:
 except ImportError:
     pass
 
-from bot.bingx import BingXClient
-from bot.config import Config, load_config
-from bot.models import Candle
-from bot.strategy import MIN_BARS, build_series, cbc_against, evaluate
-from bot.tracker import close_trade_at, new_trade, step_trade
-from bot.universe import build_universe
+from bingx import BingXClient
+from config import Config, load_config
+from models import Candle
+from strategy import MIN_BARS, build_series, cbc_against, evaluate
+from tracker import close_trade_at, new_trade, step_trade
+from universe import build_universe
 
 
 async def fetch_history(bingx: BingXClient, symbol: str, interval: str, ltf_ms: int, days: float) -> List[Candle]:
