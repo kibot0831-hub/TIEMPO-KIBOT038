@@ -1,10 +1,9 @@
-__pycache__/
-*.py[cod]
 .env
+__pycache__/
+*.pyc
 .venv/
 venv/
-data/
-*.json
-.DS_Store
+state.json
+state.json.tmp
 .idea/
 .vscode/
