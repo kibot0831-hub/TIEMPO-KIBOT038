@@ -1,9 +1,4 @@
 .env
+venv/
 __pycache__/
 *.pyc
-.venv/
-venv/
-state.json
-state.json.tmp
-.idea/
-.vscode/

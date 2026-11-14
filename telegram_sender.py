@@ -54,6 +54,7 @@ def send_top_signals(signals: List[Dict]):
         send_telegram_message("⏳ MapleStax CBC: No se encontraron setups de calidad en este ciclo.")
         return
     
+    # Header
     header = f"🚀 <b>MapleStax CBC – Top {len(signals)} señales</b>\n"
     header += f"Timeframe: 5m | Exchange: BingX\n"
     header += "────────────────────\n"
