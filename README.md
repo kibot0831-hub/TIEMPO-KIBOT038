@@ -4,7 +4,7 @@ Bot que analiza **todas las monedas perpetuas USDT de BingX**, aplica la estrate
 
 ## Características
 
-- Escanea las monedas más líquidas de BingX Futures
+- Escanea **todas** las monedas perpetuas USDT de BingX Futures (con control de límite de peticiones)
 - Aplica exactamente la lógica del indicador Pine (ER, RVOL, CVD, OBV, CMF, VWAP, ATR regime, Volume Flip, HTF bias)
 - Ranking por score de calidad
 - Envía solo las Top 5 mejores setups
@@ -83,7 +83,8 @@ Puedes modificar en `config.py`:
 
 - `TOP_N` → cuántas señales enviar (default 5)
 - `MIN_SCORE` → score mínimo para aceptar la señal
-- `MAX_SYMBOLS_TO_SCAN` → cuántas monedas analizar
+- `MAX_SYMBOLS_TO_SCAN` → cuántas monedas analizar (0 = todas)
+- `MIN_24H_VOLUME_USDT` → volumen mínimo 24h (0 = sin filtro)
 - `SCAN_INTERVAL_SECONDS` → cada cuánto escanear (300 = 5 min)
 - `ER_MAX`, `RVOL_MIN`, etc. → umbrales de los filtros
 

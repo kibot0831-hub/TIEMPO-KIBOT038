@@ -1,6 +1,7 @@
 import requests
 import time
 import logging
+import threading
 from typing import List, Dict, Optional
 import config
 
@@ -13,20 +14,38 @@ class BingXClient:
         self.session.headers.update({
             "User-Agent": "MapleStax-CBC-Bot/1.0"
         })
+        self._rl_lock = threading.Lock()
+        self._next_slot = 0.0
+        self._min_gap = 1.0 / max(1, getattr(config, "MAX_REQUESTS_PER_SECOND", 8))
+
+    def _throttle(self):
+        """Limita peticiones/segundo entre todos los hilos."""
+        with self._rl_lock:
+            now = time.monotonic()
+            wait = self._next_slot - now
+            self._next_slot = max(now, self._next_slot) + self._min_gap
+        if wait > 0:
+            time.sleep(wait)
 
     def _get(self, path: str, params: dict = None) -> dict:
         url = f"{self.base}{path}"
-        try:
-            r = self.session.get(url, params=params, timeout=12)
-            r.raise_for_status()
-            data = r.json()
-            if data.get("code") != 0:
-                logger.warning(f"BingX error {data.get('code')}: {data.get('msg')}")
-                return {}
-            return data.get("data", {})
-        except Exception as e:
-            logger.error(f"Request error {path}: {e}")
-            return {}
+        for attempt in range(3):
+            try:
+                self._throttle()
+                r = self.session.get(url, params=params, timeout=12)
+                if r.status_code == 429:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                if data.get("code") != 0:
+                    logger.warning(f"BingX error {data.get('code')}: {data.get('msg')}")
+                    return {}
+                return data.get("data", {})
+            except Exception as e:
+                logger.error(f"Request error {path} (intento {attempt + 1}): {e}")
+                time.sleep(1)
+        return {}
 
     def get_all_perpetual_symbols(self) -> List[str]:
         """Devuelve lista de símbolos USDT-M perpetuos (formato BTC-USDT)"""
@@ -106,7 +125,7 @@ class BingXClient:
         result.sort(key=lambda x: x["open_time"])
         return result
 
-    def get_top_liquid_symbols(self, max_symbols: int = 80, min_volume: float = 500000) -> List[str]:
+    def get_top_liquid_symbols(self, max_symbols: int = 0, min_volume: float = 0) -> List[str]:
         """Combina contratos + volumen 24h y devuelve los más líquidos"""
         symbols = self.get_all_perpetual_symbols()
         volumes = self.get_24h_tickers()
@@ -118,6 +137,8 @@ class BingXClient:
                 scored.append((s, vol))
         
         scored.sort(key=lambda x: x[1], reverse=True)
-        top = [s for s, _ in scored[:max_symbols]]
+        # max_symbols = 0 / None -> todas las monedas
+        limit = max_symbols if max_symbols else len(scored)
+        top = [s for s, _ in scored[:limit]]
         logger.info(f"Símbolos líquidos seleccionados: {len(top)}")
         return top

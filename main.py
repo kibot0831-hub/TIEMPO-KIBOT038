@@ -1,6 +1,7 @@
 import time
 import logging
 import schedule
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import config
 from bingx_client import BingXClient
@@ -34,29 +35,26 @@ def run_scan():
         return
     
     logger.info(f"Analizando {len(symbols)} símbolos...")
-    
-    signals = []
-    
-    for i, symbol in enumerate(symbols, 1):
+
+    def scan_one(symbol):
         try:
             klines = client.get_klines(symbol, interval=config.TIMEFRAME, limit=config.LOOKBACK_BARS)
             if not klines:
-                continue
-            
+                return None
             # Descartar la vela en formación: la estrategia trabaja con velas cerradas
-            klines = klines[:-1]
-            result = analyze_symbol(klines, symbol)
-            if result:
-                signals.append(result)
-                logger.info(f"  ✓ Señal encontrada: {symbol} {result['direction']} (score {result['score']})")
-            
-            # Pequeña pausa para no saturar la API
-            if i % 10 == 0:
-                time.sleep(0.4)
-                
+            return analyze_symbol(klines[:-1], symbol)
         except Exception as e:
             logger.warning(f"Error analizando {symbol}: {e}")
-            continue
+            return None
+
+    signals = []
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=config.SCAN_WORKERS) as pool:
+        for result in pool.map(scan_one, symbols):
+            if result:
+                signals.append(result)
+                logger.info(f"  ✓ Señal: {result['symbol']} {result['direction']} (score {result['score']})")
+    logger.info(f"Escaneo de {len(symbols)} símbolos en {time.time() - t0:.0f}s")
     
     # Ordenar por score descendente y quedarnos con las TOP_N
     signals.sort(key=lambda x: x["score"], reverse=True)
@@ -80,7 +78,7 @@ def main():
     send_telegram_message(
         "🤖 <b>MapleStax CBC Bot iniciado</b>\n"
         f"Escaneo cada {config.SCAN_INTERVAL_SECONDS // 60} minutos\n"
-        f"Analizando top {config.MAX_SYMBOLS_TO_SCAN} monedas más líquidas de BingX\n"
+        "Analizando TODAS las monedas perpetuas USDT de BingX\n"
         f"Enviando las {config.TOP_N} mejores señales"
     )
     

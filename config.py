@@ -29,8 +29,12 @@ MIN_SCORE = 6                # score mínimo para considerar la señal
 
 # Runtime
 SCAN_INTERVAL_SECONDS = 300  # 5 minutos
-MAX_SYMBOLS_TO_SCAN = 80     # límite de seguridad (los más líquidos)
-MIN_24H_VOLUME_USDT = 500000 # filtrar monedas con poco volumen
+MAX_SYMBOLS_TO_SCAN = 0      # 0 = analizar TODAS las monedas perpetuas USDT de BingX
+MIN_24H_VOLUME_USDT = 0      # 0 = sin filtro de volumen (todas las monedas)
 
 # Logging
+# Velocidad de escaneo (BingX limita ~100 peticiones/10s por IP en datos de mercado)
+MAX_REQUESTS_PER_SECOND = 8
+SCAN_WORKERS = 6
+
 LOG_LEVEL = "INFO"
