@@ -36,7 +36,7 @@ def calculate_cmf(df: pd.DataFrame, length: int = 20) -> float:
     mfv = mfm * volume
     if len(mfv) < length:
         return 0.0
-    return mfv[-length:].sum() / volume[-length:].sum()
+    return float(mfv[-length:].sum() / volume[-length:].sum())
 
 def calculate_obv(df: pd.DataFrame) -> pd.Series:
     direction = np.sign(df["close"].diff()).fillna(0)
@@ -52,7 +52,6 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     
     df = pd.DataFrame(klines)
     
-    # Asegurar tipos
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     
@@ -71,12 +70,13 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     er_ok = er <= config.ER_MAX
     
     vol_sma = volume.rolling(20).mean()
-    rvol = volume.iloc[-1] / vol_sma.iloc[-1] if vol_sma.iloc[-1] > 0 else 1.0
+    rvol = float(volume.iloc[-1] / vol_sma.iloc[-1]) if vol_sma.iloc[-1] > 0 else 1.0
     rvol_ok = rvol >= config.RVOL_MIN
     
     # ATR regime
-    atr_val = atr(df, 14).iloc[-1]
-    atr_sma = atr(df, 14).rolling(50).mean().iloc[-1]
+    atr_series = atr(df, 14)
+    atr_val = float(atr_series.iloc[-1])
+    atr_sma = float(atr_series.rolling(50).mean().iloc[-1])
     atr_ok = atr_val < atr_sma * config.ATR_MULT_REG if atr_sma > 0 else True
     
     # CVD simple (body position weighted)
@@ -85,7 +85,7 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     delta = volume * (2 * body_pos - 1)
     cvd = delta.cumsum()
     cvd_ma = cvd.ewm(span=14, adjust=False).mean()
-    cvd_slope = cvd.iloc[-1] - cvd.iloc[-4] if len(cvd) > 4 else 0
+    cvd_slope = float(cvd.iloc[-1] - cvd.iloc[-4]) if len(cvd) > 4 else 0.0
     cvd_bull = cvd.iloc[-1] > cvd_ma.iloc[-1] and cvd_slope > 0
     cvd_bear = cvd.iloc[-1] < cvd_ma.iloc[-1] and cvd_slope < 0
     
@@ -98,25 +98,24 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     # CMF
     cmf = calculate_cmf(df, 20)
     
-    # VWAP session aproximado (últimas 24h de 5m = 288 velas, usamos lo que haya)
+    # VWAP aproximado
     typical = (high + low + close) / 3
     vwap = (typical * volume).cumsum() / volume.cumsum()
-    vwap_last = vwap.iloc[-1]
+    vwap_last = float(vwap.iloc[-1])
     
     # Última vela
-    last_close = close.iloc[-1]
-    last_open = open_.iloc[-1]
+    last_close = float(close.iloc[-1])
+    last_open = float(open_.iloc[-1])
     red_close = last_close < last_open
     green_close = last_close > last_open
     
     vol_flip_long = red_close and volume.iloc[-1] > volume.iloc[-2]
     vol_flip_short = green_close and volume.iloc[-1] > volume.iloc[-2]
     
-    # HTF bias (15m aproximado usando 3 velas de 5m)
-    # Simplificación: usamos EMA 20 de 5m como proxy de bias
+    # HTF bias (proxy con EMA 20)
     ema20 = ema(close, 20)
-    htf_bull = last_close > ema20.iloc[-1]
-    htf_bear = last_close < ema20.iloc[-1]
+    htf_bull = last_close > float(ema20.iloc[-1])
+    htf_bear = last_close < float(ema20.iloc[-1])
     
     # === Condiciones de señal ===
     long_cond = (
@@ -150,7 +149,7 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     
     direction = "LONG" if long_cond else "SHORT"
     
-    # Score (cuántos filtros fuertes pasaron + calidad)
+    # Score
     score = 0
     score += 2 if er_ok else 0
     score += 2 if rvol_ok else 0
@@ -159,12 +158,12 @@ def analyze_symbol(klines: list, symbol: str) -> Optional[Dict[str, Any]]:
     score += 1 if (obv_bull if long_cond else obv_bear) else 0
     score += 1 if abs(cmf) > 0.05 else 0
     score += 1 if rvol > 1.5 else 0
-    score += 1 if er < 0.30 else 0   # mejor mean-reversion
+    score += 1 if er < 0.30 else 0
     
     if score < config.MIN_SCORE:
         return None
     
-    # Precios de entrada / SL / TP
+    # Precios
     entry = last_close
     risk = atr_val * config.ATR_SL_MULT
     

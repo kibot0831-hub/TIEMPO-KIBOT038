@@ -1,7 +1,7 @@
 import requests
 import time
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 import config
 
 logger = logging.getLogger(__name__)
@@ -11,59 +11,59 @@ class BingXClient:
         self.base = config.BINGX_BASE_URL
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "MapleStax-CBC-Bot/1.0"
+            "User-Agent": "MapleStax-CBC-Bot/1.1"
         })
 
     def _get(self, path: str, params: dict = None) -> dict:
         url = f"{self.base}{path}"
         try:
-            r = self.session.get(url, params=params, timeout=12)
+            r = self.session.get(url, params=params, timeout=15)
             r.raise_for_status()
             data = r.json()
-            if data.get("code") != 0:
-                logger.warning(f"BingX error {data.get('code')}: {data.get('msg')}")
+            if data.get("code") not in (0, "0", None):
+                logger.warning(f"BingX code {data.get('code')}: {data.get('msg')}")
                 return {}
-            return data.get("data", {})
+            return data.get("data", data)
         except Exception as e:
             logger.error(f"Request error {path}: {e}")
             return {}
 
     def get_all_perpetual_symbols(self) -> List[str]:
-        """Devuelve lista de símbolos USDT-M perpetuos (formato BTC-USDT)"""
         data = self._get("/openApi/swap/v2/quote/contracts")
         if not data:
             return []
         
         symbols = []
-        for item in data:
-            # Solo contratos online y USDT
-            if (item.get("status") == 1 and 
-                item.get("currency") == "USDT" and
-                item.get("symbol", "").endswith("-USDT")):
-                symbols.append(item["symbol"])
+        items = data if isinstance(data, list) else data.get("contracts", [])
+        for item in items:
+            try:
+                symbol = item.get("symbol", "")
+                status = item.get("status", 0)
+                currency = item.get("currency", "")
+                if status == 1 and currency == "USDT" and symbol.endswith("-USDT"):
+                    symbols.append(symbol)
+            except Exception:
+                continue
         return symbols
 
     def get_24h_tickers(self) -> Dict[str, float]:
-        """Devuelve {symbol: quoteVolume} para filtrar por liquidez"""
         data = self._get("/openApi/swap/v2/quote/ticker")
-        if not data:
-            return {}
-        
         volumes = {}
-        if isinstance(data, list):
-            for t in data:
+        if not data:
+            return volumes
+        
+        items = data if isinstance(data, list) else []
+        for t in items:
+            try:
                 sym = t.get("symbol")
                 vol = float(t.get("quoteVolume", 0) or 0)
                 if sym:
                     volumes[sym] = vol
+            except Exception:
+                continue
         return volumes
 
     def get_klines(self, symbol: str, interval: str = "5m", limit: int = 120) -> List[dict]:
-        """
-        Devuelve lista de velas:
-        [{open_time, open, high, low, close, volume}, ...]
-        ordenadas de más antigua a más reciente
-        """
         params = {
             "symbol": symbol,
             "interval": interval,
@@ -74,13 +74,17 @@ class BingXClient:
         if not data:
             return []
         
-        # BingX a veces devuelve lista directa, a veces dentro de otra estructura
-        klines_raw = data if isinstance(data, list) else data.get("klines", data)
+        # BingX puede devolver lista directa o dentro de una clave
+        if isinstance(data, list):
+            klines_raw = data
+        elif isinstance(data, dict):
+            klines_raw = data.get("klines") or data.get("data") or []
+        else:
+            return []
         
         result = []
         for k in klines_raw:
             try:
-                # Formato típico BingX: [open_time, open, high, low, close, volume, close_time, ...]
                 if isinstance(k, list) and len(k) >= 6:
                     result.append({
                         "open_time": int(k[0]),
@@ -102,12 +106,10 @@ class BingXClient:
             except Exception:
                 continue
         
-        # Asegurar orden cronológico (más antigua primero)
         result.sort(key=lambda x: x["open_time"])
         return result
 
-    def get_top_liquid_symbols(self, max_symbols: int = 80, min_volume: float = 500000) -> List[str]:
-        """Combina contratos + volumen 24h y devuelve los más líquidos"""
+    def get_top_liquid_symbols(self, max_symbols: int = 60, min_volume: float = 800000) -> List[str]:
         symbols = self.get_all_perpetual_symbols()
         volumes = self.get_24h_tickers()
         
